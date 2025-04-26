@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+
+{% block title %}Join Chat{% endblock %}
+
+{% block content %}
+<div class="join-chat-container">
+    <h2 class="mb-4">Join a Chat</h2> 
+
+    <form id="joinChatForm" method="POST">
+        <div class="form-group mb-3"> 
+            <label for="email" class="mb-2">Recipient's Email:</label> 
+            <input type="email" name="email" id="email" class="form-control" placeholder="Enter recipient's email" required>
+        </div>
+        <button type="submit" class="btn btn-primary mt-3">Join Chat</button> 
+    </form>
+</div>
+
+<script>
+
+window.addEventListener("pywebviewready",  function () {
+    Setup()
+});
+
+function Setup() {
+    const form = document.getElementById('joinChatForm');
+    form.addEventListener('submit', async function(event) {
+        event.preventDefault();
+
+        const emailInput = document.getElementById('email');
+        const email = emailInput.value;
+
+        const formData = new FormData();
+        formData.append('email', email);
+
+        try {
+            const response = await fetch('{{ url_for("join_chat") }}', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (response.redirected) {
+                alert("Recipient does not exit, you have provided your own email address or you are already in a chat with given user.");
+                window.location.href = response.url;
+            }
+            
+            const data = await response.json();
+            const info = data.info;
+            const string = JSON.stringify(info)
+            const dict = JSON.parse(string)
+            const isValid = await validateInfo(dict);
+
+            if (isValid[0] === true) {
+                const confirmData = new FormData();
+                confirmData.append('email', email);
+                confirmData.append('ephemeral', isValid[1])
+
+                const confirmResponse = await fetch('{{ url_for("join_chat_confirm") }}', {
+                    method: 'POST',
+                    body: confirmData
+                });
+
+                const confirmDataJson = await confirmResponse.json();
+
+                if (confirmDataJson.error) {
+                    alert(confirmDataJson.error);
+                    if (confirmDataJson.redirect_url) {
+                        window.location.href = confirmDataJson.redirect_url;
+                    }
+                    return;
+                }
+
+                window.location.href = confirmDataJson.redirect_url;
+            } else {
+                alert('Validation failed.');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+        }
+    });
+}
+
+async function validateInfo(info) {
+    const signing_result = await window.pywebview.api.verify_signature(info["EMAIL"], info["recipient_SIGNATURE"], info["recipient_BS"], info["recipient_SPK"], info["recipient_SIGN"]);
+    const ephemeral_key = await window.pywebview.api.generate_ephemeral_key()
+    return [signing_result, ephemeral_key]
+}
+
+</script>
+
+{% endblock %}

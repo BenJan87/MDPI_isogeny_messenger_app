@@ -1,0 +1,700 @@
+{% extends "base.html" %}
+
+{% block title %}Messaging App{% endblock %}
+
+{% block content %}
+<div class="container-fluid" style="height: 70vh; display: flex; flex-direction: column; overflow: hidden;">
+    <div class="row flex-grow-1" style="display: flex; overflow: hidden;">
+        <div class="col-4 p-3 bg-light border-right" style="overflow-y: auto;">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5>Chats</h5>
+                <a href="{{ url_for('join_chat') }}" class="btn btn-outline-primary btn-sm">+ New Chat</a>
+            </div>
+
+            <div class="chat-list" style="max-height: calc(70vh - 100px); overflow-y: auto;">
+                <ul class="list-group">
+                    {% if info %}
+                        {% for chat in info %}
+                        <li class="list-group-item {% if chat.current %}active{% endif %}">
+                            <a href="{{ url_for('chat', r=chat.room_id) }}" class="d-block text-dark text-decoration-none">
+                                <div>
+                                    <strong>{{ chat.username }}</strong> <br>
+                                    {% if chat.last_message['message'] == 'No messages yet' %}
+                                    <small id="last-message-{{chat.room_id}}">{{ chat.last_message['message'] }}</small><br> 
+                                    <small id="last-message-time-{{chat.room_id}}" class="text-black"></small>
+                                    {% else %}
+                                    <small id="last-message-{{chat.room_id}}">Loading...</small><br>         
+                                    <small id="last-message-time-{{chat.room_id}}" class="text-black">{{ chat.last_message['timestamp'] }}</small>
+                                    {% endif %}
+                                </div>
+                            </a>
+                        </li>
+                        {% endfor %}
+                    {% else %}
+                        <li class="list-group-item">No active chats present.</li>
+                    {% endif %}
+                </ul>
+            </div>
+        </div>
+
+        <div class="col-8 d-flex flex-column p-3" style="overflow: hidden;">
+            {% if room_selected %}
+                <div class="chat-header d-flex justify-content-between align-items-center mb-3">
+                    <h5>Chat with {{ chat_recipient_username }}</h5>
+                </div>
+
+                <div class="messages-box flex-grow-1 mb-3 p-3 border rounded" id="messages-box" style="background: #f7f9fc; overflow-y: auto; height: calc(100vh - 400px); font-size: 0.9rem;">
+                </div>
+
+                <form id="message-form" class="d-flex" autocomplete="off">
+                    <input type="text" id="message-input" class="form-control me-2" placeholder="Type your message" required>
+                    <input type="file" id="file-input" name="attachment" class="form-control-file d-none" accept="*">
+                    <button type="button" class="btn btn-outline-secondary me-2" id="attachment-button">
+                        <i class="fas fa-paperclip"></i>
+                    </button>
+                    <button type="submit" class="btn btn-primary">Send</button>
+                </form>
+            {% elif has_active_chats %}
+                <div class="text-center mt-5">
+                    <h4>No chat selected</h4>
+                </div>
+            {% else %}
+                <div class="text-center mt-5">
+                    <h4>No active chats - would you like to join one?</h4>
+                    <a href="{{ url_for('join_chat') }}" class="btn btn-primary mt-3">Join Chat</a>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+<script type="text/javascript">
+    let socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
+    let currentRoomId = "{{ room_id }}";
+    let recipientPublicKey = "";  
+    let email = "{{ email }}";
+    let chatInfoRaw = JSON.parse('{{ info | tojson | safe }}');
+    let chatInfo = chatInfoRaw;
+    let rec_id = "{{ current_recipient_id }}";
+    let user_id = "{{ user_id }}";
+    let my_username = "{{ my_username }}";
+
+    window.addEventListener("pywebviewready", function () {
+        Init()
+    });
+
+    function Init() {
+        if (rec_id !== 'None') {
+            fetchPublicKey(rec_id);
+        }       
+        showLastMessages();
+        Inicialize(chatInfo);
+        fetchMessages(currentRoomId);
+        displayCachedMessages(currentRoomId);
+    }
+
+    function checkAndSetFlag(flagKey) {
+        const hasVisited = localStorage.getItem(flagKey);
+        if (hasVisited === null) {  
+            return true; 
+        } else {
+            return false; 
+        }
+    }
+
+    async function Inicialize(data) {
+        const chats = data;
+        for (const chat of chats) {
+           if (checkAndSetFlag(chat.room_id+chat.user_id) == true) {
+               if (chat.user_id === chat.host) {
+                   const state = await window.pywebview.api.X3DH_Alice(email, chat.recipient_IK, chat.recipient_SPK, chat.chosen_OPK);
+                   localStorage.setItem(chat.room_id+chat.user_id+"state", JSON.stringify(state));
+                   const alice_state = localStorage.getItem(chat.room_id+chat.user_id+"state");
+                   if (alice_state !== null) {
+                       const dict_state = JSON.parse(alice_state);
+                       const firstMessage = "Hello!"; 
+                       const date = new Date();
+                       await storeMessagesInIndexedDB([{
+                        message: firstMessage,
+                        sender_username: my_username,
+                        timestamp: formatTimestamp(date),
+                        attachment: false,
+                        url: "",
+                        filename: ""
+                       }], currentRoomId)
+                       const result = await window.pywebview.api.ratchet_encrypt(dict_state, firstMessage, dict_state.AD);
+                       const encryptedMessage = result[1];
+                       const header = JSON.stringify(result[0]);
+                       localStorage.setItem(chat.room_id+chat.user_id+"state", JSON.stringify(result[2]));
+                       socket.emit('send_message', {
+                           'room_id': currentRoomId,
+                           'message': encryptedMessage,
+                           'header': header
+                       });
+                       document.getElementById(`last-message-${currentRoomId}`).textContent = firstMessage;
+                       document.getElementById(`last-message-time-${currentRoomId}`).textContent = formatTimestamp(date);
+                       displayCachedMessages(currentRoomId);
+                   }
+               }
+               else {
+                   const state = await window.pywebview.api.X3DH_Bob(email, chat.ephemeral, chat.recipient_IK, chat.guess); 
+                   localStorage.setItem(chat.room_id+chat.user_id+"state", JSON.stringify(state));
+               }
+               localStorage.setItem(chat.room_id+chat.user_id, "true");
+           }
+        }
+    }
+
+    function getDatabaseName() {
+        return `MessagingAppDB_${email}`;  
+    }   
+
+    function fetchPublicKey(id) {
+        fetch(`/get_public_key/${id}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.public_key) {
+                    recipientPublicKey = data.public_key;  
+                }
+            })
+            .catch(error => {
+                console.error("Error fetching public key:", error);
+            });
+        }
+
+    async function showLastMessages() {
+        const chats = chatInfo;
+        for (const chat of chats) {
+            let cachedMessages = await getIndexedDBMessages(chat.room_id);
+            if (chat.last_message.message !== 'No messages yet') {
+                try {
+                    let decryptedMessage = "Unread messages";
+                    document.getElementById(`last-message-${chat.room_id}`).innerHTML = `<strong>${decryptedMessage}</strong>`;
+                } catch (error) {
+                    console.error("Error decrypting last message:", error);
+                }
+            } else if (cachedMessages.length > 0) {
+                let strings = JSON.stringify(cachedMessages);
+                let array = JSON.parse(strings);
+                let lastMessage = array[array.length - 1];
+                let decrypted = await decryptText(lastMessage.message);
+                let truncatedMessage = truncateMessage(decrypted);
+                document.getElementById(`last-message-${chat.room_id}`).textContent = truncatedMessage;
+                document.getElementById(`last-message-time-${chat.room_id}`).textContent = formatTimestamp(lastMessage.timestamp);
+            }
+        }
+    }
+
+    async function fetchMessages(room_id) { 
+        fetch(`/fetch_messages/${room_id}`)
+            .then(response => response.json())
+            .then(async (data) => {
+                if (data.messages && data.messages.length > 0) {
+                    const messagesBox = document.getElementById('messages-box');
+                    let decryptedMessages = [];
+                    for (let message of data.messages) {
+                        const messageDiv = document.createElement('div');
+                        messageDiv.className = 'message mb-3 p-2 rounded';
+                        let state = localStorage.getItem(currentRoomId+user_id+"state"); 
+                        let state_parse = JSON.parse(state);
+                        let header_parse = JSON.parse(message.header);
+                        try {
+                            let decryptedMessage = await window.pywebview.api.ratchet_decrypt(state_parse, header_parse, message.message, state_parse.AD);
+                            let decryptedMessageText = decryptedMessage[0];
+                            let received_state = JSON.stringify(decryptedMessage[1]);
+                            localStorage.setItem(currentRoomId+user_id+"state", received_state)
+                            decryptedMessages.push({
+                                ...message,
+                                message: decryptedMessageText,
+                            });
+                            if (message.attachment) {
+                                appendAttachmentMessage(messageDiv, {
+                                    sender_username: message.sender_username,
+                                    message: decryptedMessageText,
+                                    url: message.url,
+                                    filename: message.filename,
+                                    timestamp: message.timestamp
+                                });
+                            } else {
+                                appendTextMessage(messageDiv, {
+                                    sender_username: message.sender_username,
+                                    message: decryptedMessageText,
+                                    timestamp: message.timestamp
+                                });
+                            }
+                            messagesBox.appendChild(messageDiv);
+                            let truncatedMessage = truncateMessage(decryptedMessageText);
+                            document.getElementById(`last-message-${currentRoomId}`).textContent = truncatedMessage;
+                            document.getElementById(`last-message-time-${currentRoomId}`).textContent = formatTimestamp(message.timestamp);
+                        } catch (error) {
+                            console.error("Error decrypting message:", error);
+                        }
+                    }
+                    await storeMessagesInIndexedDB(decryptedMessages, currentRoomId); 
+                    deleteReadMessages(room_id);  
+                    messagesBox.scrollTop = messagesBox.scrollHeight;  
+                } 
+            });
+    }
+
+    async function displayCachedMessages(room_id) {
+        const cachedMessages = await getIndexedDBMessages(room_id);
+
+        if (cachedMessages && cachedMessages.length > 0) {
+            const messagesBox = document.getElementById('messages-box');
+            messagesBox.innerHTML = '';
+
+            const decryptedMessages = await Promise.all(
+                cachedMessages.map(async (message) => {
+                    message = JSON.stringify(message);
+                    message = JSON.parse(message);
+
+                    const decryptedMessage = await decryptText(message.message);
+
+                    return {
+                        ...message,
+                        message: decryptedMessage
+                    };
+                })
+            );
+
+            decryptedMessages.forEach((message) => {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message mb-3 p-2 rounded';
+
+                if (message.attachment) {
+                    appendAttachmentMessage(messageDiv, {
+                        sender_username: message.sender_username,
+                        message: message.message,
+                        url: message.url,
+                        filename: message.filename,
+                        timestamp: message.timestamp
+                    });
+                } else {
+                    appendTextMessage(messageDiv, {
+                        sender_username: message.sender_username,
+                        message: message.message,
+                        timestamp: message.timestamp
+                    });
+                }
+
+                messagesBox.appendChild(messageDiv);
+            });
+
+            messagesBox.scrollTop = messagesBox.scrollHeight;
+        }
+    }
+
+    async function storeMessagesInIndexedDB(messagesArray, room_id) {
+        const db = await initDatabase();
+
+        for (const message of messagesArray) {
+            try {
+                const encryptedMessage = await encryptText(JSON.stringify(message.message));
+
+                const data = {
+                    room_id: room_id,
+                    message: encryptedMessage,
+                    sender_username: message.sender_username,
+                    timestamp: message.timestamp,
+                    attachment: message.attachment || false,
+                    url: message.url || "",
+                    filename: message.filename || ""
+                };
+
+                const transaction = db.transaction("messages", "readwrite");
+                const store = transaction.objectStore("messages");
+
+                await new Promise((resolve, reject) => {
+                    const request = store.add(data);
+                    request.onsuccess = () => resolve();
+                    request.onerror = (event) => reject(event.target.error);
+                });
+
+            } catch (error) {
+                console.error("Error encrypting or storing message:", error);
+            }
+        }
+    }
+
+    async function getIndexedDBMessages(room_id) {
+        const db = await initDatabase();
+        const transaction = db.transaction("messages", "readonly");
+        const store = transaction.objectStore("messages");
+        const index = store.index("room_id");
+        const request = index.getAll(room_id);
+
+        return new Promise((resolve, reject) => {
+            request.onsuccess = function () {
+                resolve(request.result);
+            };
+            request.onerror = function (event) {
+                reject(event);
+            };
+        });
+    }
+
+    function initDatabase() {
+        return new Promise((resolve, reject) => {
+            const dbName = getDatabaseName();
+            const request = indexedDB.open(dbName, 1);
+
+            request.onupgradeneeded = function (event) {
+                const db = event.target.result;
+                const store = db.createObjectStore("messages", { keyPath: "id", autoIncrement: true });
+                store.createIndex("room_id", "room_id", { unique: false });
+            };
+
+            request.onsuccess = function (event) {
+                resolve(event.target.result);
+            };
+
+            request.onerror = function (event) {
+                reject(event);
+            };
+        });
+    }
+
+    async function deleteReadMessages(room_id) {
+        try {
+            const response = await fetch('/delete_read_messages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ room_id })
+            });
+
+            if (!response.ok) throw new Error("Failed to notify server to delete messages");
+        } catch (error) {
+            console.error("Error deleting messages on server:", error);
+        }
+    }
+
+    function appendAttachmentMessage(messageDiv, message) {
+        const alignmentClass = message.sender_username === "{{ session['username'] }}" 
+            ? ['bg-primary', 'text-white', 'align-self-end', 'message-right']
+            : ['bg-light', 'text-dark', 'message-left'];
+
+        messageDiv.classList.add(...alignmentClass, 'message-wrap');
+        messageDiv.innerHTML = `
+            <strong>${message.sender_username}</strong>
+            <p>${message.message}</p>
+            <p><a href="javascript:void(0)" onclick="downloadEncryptedAttachment('${message.url}', '${message.filename}')" style="color: black;">Download Attachment: ${message.filename}</a></p>
+            <small>${formatTimestamp(message.timestamp)}</small>
+        `;
+    }
+
+    function appendTextMessage(messageDiv, message) {
+        const alignmentClass = message.sender_username === "{{ session['username'] }}" 
+            ? ['bg-primary', 'text-white', 'align-self-end', 'message-right']
+            : ['bg-light', 'text-dark', 'message-left'];
+
+        messageDiv.classList.add(...alignmentClass, 'message-wrap');
+        messageDiv.innerHTML = `
+            <strong>${message.sender_username}</strong>
+            <p>${message.message}</p>
+            <small>${formatTimestamp(message.timestamp)}</small>
+        `;
+    }
+
+    function formatTimestamp(timestamp) {
+        const date = new Date(timestamp);
+        const year = date.getFullYear();
+        const month = ('0' + (date.getMonth() + 1)).slice(-2);
+        const day = ('0' + date.getDate()).slice(-2);
+        const hours = ('0' + date.getHours()).slice(-2);
+        const minutes = ('0' + date.getMinutes()).slice(-2);
+        return `${year}-${month}-${day} ${hours}:${minutes}`;
+    }
+
+    function truncateMessage(message, maxLength = 30) {
+        return message.length > maxLength ? message.substring(0, maxLength) + "..." : message;
+    }
+
+    if (currentRoomId !== 'None') {
+        document.getElementById('message-form').addEventListener('submit', async function(event) {
+            event.preventDefault();  
+            const messagesBox = document.getElementById('messages-box');
+            const newMessage = document.createElement('div');
+            newMessage.className = 'message mb-3 p-2 rounded';
+            let message = document.getElementById('message-input').value;
+            let sanitizedMessage = sanitize(message);
+            let date = new Date();
+            await storeMessagesInIndexedDB([{
+                message: sanitizedMessage,
+                sender_username: my_username,
+                timestamp: formatTimestamp(date),
+                attachment: false,
+                url: "",
+                filename: ""
+            }], currentRoomId)
+            let state = localStorage.getItem(currentRoomId+user_id+"state");
+            let dict_state = JSON.parse(state);
+            let encryptedMessage = await window.pywebview.api.ratchet_encrypt(dict_state, sanitizedMessage, dict_state.AD);
+            let encryptedMessageText = encryptedMessage[1];
+            let header = JSON.stringify(encryptedMessage[0]);
+            localStorage.setItem(currentRoomId+user_id+"state", JSON.stringify(encryptedMessage[2]));
+            socket.emit('send_message', {
+                'room_id': currentRoomId,
+                'message': encryptedMessageText,  
+                'header': header
+            });
+            appendTextMessage(newMessage, {
+                sender_username: my_username,
+                message: sanitizedMessage,
+                timestamp: formatTimestamp(date)
+            }); 
+            messagesBox.appendChild(newMessage);
+            messagesBox.scrollTop = messagesBox.scrollHeight;
+            let truncatedMessage = truncateMessage(message);
+            document.getElementById(`last-message-${currentRoomId}`).textContent = truncatedMessage;
+            document.getElementById(`last-message-time-${currentRoomId}`).textContent = formatTimestamp(date);
+            document.getElementById('message-input').value = ''; 
+        });
+    }
+
+    socket.on('receive_message', async function(data) {
+        data = JSON.stringify(data);
+        data = JSON.parse(data);
+        const messagesBox = document.getElementById('messages-box');
+        const newMessage = document.createElement('div');
+        newMessage.className = 'message mb-3 p-2 rounded';
+        if (data.sender_id != user_id) {
+            let state = localStorage.getItem(currentRoomId+user_id+"state");
+            let parsed = JSON.parse(state);
+            let header = data.header;
+            let decryptedMessage = await window.pywebview.api.ratchet_decrypt(state, data.header, data.message, state.AD);
+            let received_state = JSON.stringify(decryptedMessage[1]);
+            localStorage.setItem(currentRoomId+user_id+"state", received_state)
+            if (data.attachment === 1) {
+                appendAttachmentMessage(newMessage, {
+                    sender_username: data.sender_username,
+                    message: decryptedMessage[0],
+                    url: data.url,
+                    filename: data.filename,
+                    timestamp: data.timestamp
+                });
+            } else {
+                appendTextMessage(newMessage, {
+                    sender_username: data.sender_username,
+                    message: decryptedMessage[0],
+                    timestamp: data.timestamp
+                });
+            }
+            messagesBox.appendChild(newMessage);
+            messagesBox.scrollTop = messagesBox.scrollHeight;
+
+            await storeMessagesInIndexedDB([{
+                message: decryptedMessage[0],
+                sender_username: data.sender_username,
+                timestamp: data.timestamp,
+                attachment: data.attachment || false,
+                url: data.url || "",
+                filename: data.filename || ""
+            }], currentRoomId)
+            let truncatedMessage = truncateMessage(decryptedMessage[0]);
+            let now = new Date();
+            document.getElementById(`last-message-${currentRoomId}`).textContent = truncatedMessage;
+            document.getElementById(`last-message-time-${currentRoomId}`).textContent = data.timestamp;
+        }
+
+        deleteReadMessages(currentRoomId);
+    });
+
+    if (currentRoomId !== 'None') {
+        document.getElementById('attachment-button').addEventListener('click', function(event) {
+            event.preventDefault();
+            document.getElementById('file-input').click();  
+        });
+    }
+
+    if (currentRoomId !== 'None') {
+        document.getElementById('file-input').addEventListener('change', function(event) {
+        
+        let fileInput = event.target;
+        let messageInput = document.getElementById('message-input');
+        let sanitized = sanitize(messageInput.value);
+        let formData = new FormData();
+
+        if (fileInput.files.length > 0) {
+            let file = fileInput.files[0];
+            let filename = file.name;
+
+            if (file.size > 524288) {  
+                alert("File size exceeds 512 kB. Please select a smaller file.");
+                return;
+            }
+
+            fileToBase64(file).then(async (base64String) => {
+                try {
+                    const messagesBox = document.getElementById('messages-box');
+                    const newMessage = document.createElement('div');
+                    newMessage.className = 'message mb-3 p-2 rounded';
+                    let msgToEncrypt = "Attachment: " + filename + " " + sanitized;         
+                    let state = localStorage.getItem(currentRoomId+user_id+"state")
+                    let dict_state = JSON.parse(state)
+                    let encryptedMessage = await window.pywebview.api.ratchet_encrypt(dict_state, msgToEncrypt, dict_state.AD);
+                    let header = JSON.stringify(encryptedMessage[0]);
+                    localStorage.setItem(currentRoomId+user_id+"state", JSON.stringify(encryptedMessage[2]));
+                    let encryptedFile = await window.pywebview.api.encrypt_attachment(base64String, recipientPublicKey, email);
+                    formData.append('filename', filename);  
+                    formData.append('blob', encryptedFile); 
+                    formData.append('message', encryptedMessage[1]);  
+                    formData.append('header', header);
+                    formData.append('room_id', currentRoomId);
+                    fetch('/upload_attachment', {
+                        method: 'POST',
+                        body: formData
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            fileInput.value = '';  
+                            messageInput.value = '';  
+                            let now = new Date();
+                            appendAttachmentMessage(newMessage, {
+                                sender_username: my_username,
+                                message: sanitized,
+                                url: data.url,
+                                filename: filename,
+                                timestamp: formatTimestamp(now)
+                            });
+                            messagesBox.appendChild(newMessage);
+                            messagesBox.scrollTop = messagesBox.scrollHeight;
+                            let truncatedMessage = truncateMessage(msgToEncrypt);
+                            document.getElementById(`last-message-${currentRoomId}`).textContent = truncatedMessage;
+                            document.getElementById(`last-message-time-${currentRoomId}`).textContent = formatTimestamp(now);
+                        }
+                        })
+                        .catch(error => {
+                            console.error("Error uploading encrypted file:", error);
+                        });
+                    } catch (error) {
+                        console.error("Error during encryption:", error);
+                    }
+                }).catch(error => {
+                    console.error("Error converting file to Base64:", error);
+                });
+            }
+        });
+    }
+
+    function fileToBase64(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                resolve(event.target.result);  
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+    }
+
+    async function downloadEncryptedAttachment(fileUrl, filename) {
+        try {
+            const response = await fetch(`/download_attachment/${fileUrl}`); 
+            const encryptedBlob = await response.text();
+            const decryptedAttachment = await window.pywebview.api.decrypt_attachment(encryptedBlob, recipientPublicKey, email);
+            const mimeType = decryptedAttachment.match(/:(.*?);/)[1];
+            base64ToFile(decryptedAttachment, mimeType, filename)
+        } catch (error) {
+            console.error("Error downloading or decrypting the file:", error);
+        }
+    }
+
+    function base64ToFile(base64String, mimeType, fileName) {
+        const base64Data = base64String.replace(/^data:.+;base64,/, '');
+        const byteCharacters = atob(base64Data); 
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+            byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        const blob = new Blob([byteArray], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        link.click();
+        URL.revokeObjectURL(url);
+    }
+
+    async function encryptText(plaintext) {
+        const hash = "{{ hash }}";
+        const key = await deriveKey(hash);
+        const encoder = new TextEncoder();
+        const encodedPlaintext = encoder.encode(plaintext);
+        const iv = window.crypto.getRandomValues(new Uint8Array(12));
+
+        const cryptoKey = await window.crypto.subtle.importKey(
+            'raw',
+            key,
+            { name: 'AES-GCM' },
+            false,
+            ['encrypt']
+        );
+
+        const ciphertext = await window.crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv: iv },
+            cryptoKey,
+            encodedPlaintext
+        );
+
+        const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+        combined.set(iv);
+        combined.set(new Uint8Array(ciphertext), iv.length);
+
+        return btoa(String.fromCharCode(...combined));
+    }
+
+    async function decryptText(combinedCiphertext) {
+        const hash = "{{ hash }}";
+        const key = await deriveKey(hash);
+        const combinedBuffer = Uint8Array.from(atob(combinedCiphertext), c => c.charCodeAt(0));
+        const iv = combinedBuffer.slice(0, 12);
+        const ciphertext = combinedBuffer.slice(12); 
+
+        const cryptoKey = await window.crypto.subtle.importKey(
+            'raw',
+            key,
+            { name: 'AES-GCM' },
+            false,
+            ['decrypt']
+        );
+
+        const decrypted = await window.crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv: iv },
+            cryptoKey,
+            ciphertext
+        );
+
+        const decoder = new TextDecoder();
+        const textDecrypted = decoder.decode(decrypted);
+        return JSON.parse(textDecrypted);
+    }
+
+    async function deriveKey(key, length = 32) {
+        const encoder = new TextEncoder();
+        const keyMaterial = encoder.encode(key); 
+        const hashBuffer = await crypto.subtle.digest("SHA-256", keyMaterial);
+        const derivedKey = new Uint8Array(hashBuffer).slice(0, length);
+        return derivedKey.buffer;
+    }
+
+    function sanitize(string) {
+      const map = {
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#x27;',
+          "/": '&#x2F;',
+          "`": '&grave'
+      };
+      const reg = /[&<>"'/]/ig;
+      return string.replace(reg, (match)=>(map[match]));
+    }
+
+</script>
+
+{% endblock %}
